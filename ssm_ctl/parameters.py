@@ -125,7 +125,7 @@ class SSMClient(object):
     
     @classmethod
     def delete_path(cls, path, recursive=True, parameter_filters=[]):
-        names = cls.get_path(path, recursive=recursive, parameter_filters=parameter_filters)
+        names = cls.get_path(path, names_only=True, recursive=recursive, parameter_filters=parameter_filters)
         return cls.delete(*names)
 
 class SSMParameter(object):

@@ -28,8 +28,7 @@ def push_main(args=None):
     try:
         for parameter_file in args.parameter_file:
             six.print_("Processing {}...".format(parameter_file.name))
-            obj = yaml.load(parameter_file)
-            data = parse_parameter_file(obj, input_values)
+            data = parse_parameter_file(yaml.load(parameter_file), input_values)
             parameters.update(data.parameters)
             flush.extend(data.flush)
     except InputError as e:
@@ -43,6 +42,34 @@ def push_main(args=None):
     
     six.print_("Putting parameters")
     SSMClient.batch_put(*six.itervalues(parameters))
+
+def delete_main(args=None):
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument('parameter_file', type=argparse.FileType('r'), nargs='+')
+    parser.add_argument('--input', nargs=2, action='append', default=[])
+    
+    args = parser.parse_args(args=args)
+    
+    input_values = dict(args.input)
+    
+    parameters = {}
+    flush = []
+    try:
+        for parameter_file in args.parameter_file:
+            six.print_("Processing {}...".format(parameter_file.name))
+            data = parse_parameter_file(yaml.load(parameter_file), input_values)
+            parameters.update(data.parameters)
+            flush.extend(data.flush)
+    except InputError as e:
+        parser.exit(1, '{}\n'.format(e))
+    
+    for path in flush:
+        six.print_("Flushing {}...".format(path))
+        SSMClient.delete_path(path)
+    
+    six.print_("Deleting parameters")
+    SSMClient.delete(*[p.name for p in six.itervalues(parameters)])
 
 def download_main(args=None):
     parser = argparse.ArgumentParser()
@@ -76,7 +103,7 @@ def main(args=None):
     if args is None:
         args = sys.argv[1:]
     
-    commands = ['push', 'audit', 'download']
+    commands = ['push', 'delete', 'download']
     
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=commands)

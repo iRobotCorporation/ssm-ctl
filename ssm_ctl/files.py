@@ -66,7 +66,7 @@ class Input(object):
         for name, data in six.iteritems(obj):
             inputs[name] = cls(
                 name,
-                data.get('Type', 'String'),
+                data.get('Type'),
                 pattern=data.get('Pattern'),
                 description=data.get('Description'),
             )
@@ -81,7 +81,9 @@ class Input(object):
         self._usage_pattern = re.escape('$({})'.format(self.name))
     
     def prompt(self):
-        value = input('Enter {} ({}): '.format(self.name, self.type))
+        type_str = ' [{}]'.format(self.type) if self.type else ''
+        desc_str = ' ({})'.format(self.description) if self.description else ''
+        value = input('Enter {}{}{}: '.format(self.name, type_str, desc_str))
         if self.pattern and not re.search(self.pattern, value):
             raise InputError("Invalid input")
         return value
