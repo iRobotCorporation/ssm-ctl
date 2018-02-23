@@ -23,18 +23,37 @@ class Input(object):
     def load(cls, obj):
         inputs = {}
         for name, data in six.iteritems(obj):
+            if isinstance(data, six.string_types):
+                data = {'Type': data}
+            if data.get('Type') == 'SecureString' and 'Default' in data:
+                raise ValueError("Defaults are not allowed for SecureString")
             inputs[name] = cls(
                 name,
                 data.get('Type'),
                 pattern=data.get('Pattern'),
                 description=data.get('Description'),
+                default=data.get('Default'),
             )
         return inputs
     
     @classmethod
     def get_resolver(cls, inputs, prompt=True, echo=None):
+        class RegionResolver(object):
+            @classmethod
+            def get_value(cls, *args, **kwargs):
+                return SSMClient.get_region()
+            
+        class AccountResolver(object):
+            @classmethod
+            def get_value(cls, *args, **kwargs):
+                return SSMClient.get_account()
+        
         def resolver(name):
             if name not in inputs:
+                if name == 'Region':
+                    return RegionResolver
+                elif name == 'Account':
+                    return AccountResolver
                 if prompt:
                     inputs[name] = cls(name)
                 else:
@@ -67,25 +86,31 @@ class Input(object):
                 if input_to_merge.description and not input.description:
                     input.description = input_to_merge.description
     
-    def __init__(self, name, type=None, pattern=None, description=None):
+    def __init__(self, name, type=None, pattern=None, description=None, default=None):
         self.name = name
         self.type = type or 'String'
         self.pattern = pattern
         self.description = description
+        self.default = default
+        
+        self._value = None
         
         self._encrypted_value = None
-        self._value = None
+        self._decrypted_value = None
     
     def value_is_set(self):
         return self._value or self._encrypted_value
     
     def get_value(self, key_id=None):
-        if not self._value:
-            if self._encrypted_value:
-                self._value = SSMClient.decrypt(self._encrypted_value, key_id)
-            else:
-                raise RuntimeError("Value is not set for input {}".format(self.name))
-        return self._value
+        if key_id:
+            if not self._decrypted_value:
+                if self._encrypted_value:
+                    self._decrypted_value = SSMClient.decrypt(self._encrypted_value, key_id)
+                else:
+                    self._decrypted_value = SSMClient.decrypt(self._value, key_id)
+            return self._decrypted_value
+        else:
+            return self._value
     
     def set_value(self, value, encrypted=None):
         if self.type == 'SecureString' and encrypted is not False:
@@ -99,7 +124,7 @@ class Input(object):
         if self.type == 'String':
             self._value = self._prompt_for_string(_echo(True))
         elif self.type == 'SecureString':
-            self._value = self._prompt_for_string(_echo(False))
+            self._decrypted_value = self._prompt_for_string(_echo(False))
         elif self.type == 'StringList':
             self._value = self._prompt_for_stringlist(_echo(True))
     
@@ -109,6 +134,8 @@ class Input(object):
         type_str = ' [{}]'.format(self.type) if self.type else ''
         desc_str = ' ({})'.format(self.description) if self.description else ''
         value = input_fn('Enter {}{}{}: '.format(self.name, type_str, desc_str))
+        if not value and self.default:
+            return self.default
         if self.pattern and not re.search(self.pattern, value):
             raise InputError("Invalid input")
         return value
@@ -117,12 +144,16 @@ class Input(object):
         input_fn = getpass.getpass if not echo else input
         print('Enter StringList {} values (blank line when done):')
         entry = input_fn('\n')
+        if not entry and self.default:
+            return self.default
         if ',' in entry:
             return entry
         value = [entry]
         while entry:
             entry = input_fn('\n')
             value.append(entry)
+        if self.pattern and not re.search(self.pattern, ','.join(value)):
+            raise InputError("Invalid input")
         return value
     
     def __str__(self):
@@ -145,7 +176,7 @@ INPUT_KEY = '.INPUT'
 COMMON_KEY = '.COMMON'
 FLUSH_KEY = '.FLUSH'
 
-def parse_parameter_file(obj):
+def parse_parameter_file(obj, vars_in_name_only=False):
     inputs = Input.load(obj.get(INPUT_KEY, {}))
     
     common_data = obj.get(COMMON_KEY, {})
@@ -177,6 +208,21 @@ def parse_parameter_file(obj):
         param_data.update(common_data)
         param_data.update(data)
         
-        parameters[name] = SSMParameter.load(param_data)
+        parameters[name] = SSMParameter.load(param_data, vars_in_name_only=vars_in_name_only)
     
     return ParameterFileData(inputs, parameters, flush)
+
+def compile_parameter_file(parameters, flush=None, ignore_disabled=False):
+    ssm_param_file_data = {}
+    
+    if flush:
+        ssm_param_file_data[FLUSH_KEY] = flush
+    
+    for parameter in parameters:
+        if parameter.disable and ignore_disabled:
+            continue
+        data = parameter.dump()
+        name = data.pop('Name')
+        ssm_param_file_data[name] = data
+    
+    return ssm_param_file_data

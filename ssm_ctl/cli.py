@@ -7,25 +7,15 @@ import argparse
 import yaml
 
 from .parameters import SSMParameter, SSMClient, VarString
-from .files import parse_parameter_file, Input, InputError, FLUSH_KEY
+from .files import parse_parameter_file, Input, InputError, ParameterFileData, compile_parameter_file
 
-def push_main(args=None):
-    parser = argparse.ArgumentParser()
-    
-    parser.add_argument('parameter_file', type=argparse.FileType('r'), nargs='+')
-    parser.add_argument('--overwrite', action='store_true', default=False, help='Allow overwrites by default')
-    parser.add_argument('--delete', action='store_true')
-    parser.add_argument('--input', nargs=2, action='append', default=[])
-    parser.add_argument('--secure-input', nargs=2, action='append', default=[])
-    parser.add_argument('--echo', action='store_true')
-    parser.add_argument('--no-echo', action='store_false', dest='echo')
-    parser.add_argument('--no-prompt', action='store_false', dest='prompt')
-    parser.set_defaults(prompt=True, echo=None)
-    
-    args = parser.parse_args(args=args)
-    
-    SSMParameter.OVERWRITE_DEFAULT = args.overwrite
-    
+def add_input_args(parser, defaults, secure=True):
+    input_group = parser.add_argument_group()
+    input_group.add_argument('--input', nargs=2, action='append', default=[])
+    if secure:
+        input_group.add_argument('--secure-input', nargs=2, action='append', default=[])
+
+def load_inputs_from_args(args):
     inputs = {}
     for input_name, input_value in args.input:
         input = Input(input_name, 'String')
@@ -37,55 +27,110 @@ def push_main(args=None):
         input.set_value(input_value, encrypted=True)
         inputs[input_name] = input
     
+    return inputs
+
+def add_echo_args(parser, defaults):
+    echo_group = parser.add_mutually_exclusive_group()
+    echo_group.add_argument('--echo', action='store_true')
+    echo_group.add_argument('--no-echo', action='store_false', dest='echo')
+    defaults['echo'] = None
+
+def add_prompt_args(parser, defaults):
+    prompt_group = parser.add_mutually_exclusive_group()
+    prompt_group.add_argument('--prompt', action='store_true')
+    prompt_group.add_argument('--no-prompt', action='store_false', dest='prompt')
+    defaults['prompt'] = True
+
+def load_parameter_files(args, inputs=None):
+    if inputs is None:
+        inputs = {}
     parameters = {}
     flush = []
     for parameter_file in args.parameter_file:
-        six.print_("Processing {}...".format(parameter_file.name))
+        six.print_("Loading {}...".format(parameter_file.name))
         data = parse_parameter_file(yaml.load(parameter_file))
         Input.merge_inputs(inputs, data.inputs)
         parameters.update(data.parameters)
         flush.extend(data.flush)
-    
-    six.print_("Processing inputs...")
+    return ParameterFileData(inputs, parameters, flush)
+
+def process_inputs(inputs, prompt, echo):
     try:
-        resolver = Input.get_resolver(inputs, prompt=args.prompt, echo=args.echo)
+        six.print_("Processing inputs...")
+        resolver = Input.get_resolver(inputs, prompt=prompt, echo=echo)
         VarString.resolve(resolver)
     except InputError as e:
-        parser.exit(1, '{}\n'.format(e))
+        sys.stderr.write('{}\n'.format(e))
+        sys.exit(1)
+
+def flush(paths):
+    for path in paths:
+        six.print_("Flushing {}...".format(path))
+        SSMClient.delete_path(path)
+
+def push_main(args=None):
+    parser = argparse.ArgumentParser()
     
-    if args.delete and flush:
+    parser.add_argument('parameter_file', type=argparse.FileType('r'), nargs='+')
+    parser.add_argument('--overwrite', action='store_true', default=False, help='Allow overwrites by default')
+    parser.add_argument('--delete', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+    
+    defaults = {}
+    
+    add_input_args(parser, defaults)
+    add_echo_args(parser, defaults)
+    add_prompt_args(parser, defaults)
+    
+    parser.set_defaults(**defaults)
+    args = parser.parse_args(args=args)
+    
+    inputs = load_inputs_from_args(args)
+    
+    inputs, parameters, flush_paths = load_parameter_files(args, inputs)
+    
+    process_inputs(inputs, prompt=args.prompt, echo=args.echo)
+    
+    if args.dry_run:
+        kwargs = {
+            'ignore_disabled': True
+        }
+        if args.delete:
+            kwargs['flush'] = flush_paths
+        data = compile_parameter_file(six.itervalues(parameters), **kwargs)
+        six.print_('*** PARAMETERS TO PUSH ***')
+        six.print_(yaml.dump(data, default_flow_style=False))
+        return
+    
+    if args.delete:
         six.print_("Flushing existing parameters...")
-        for path in flush:
-            six.print_("Flushing {}...".format(path))
-            SSMClient.delete_path(path)
+        flush(flush_paths)
     
     six.print_("Putting parameters")
+    SSMParameter.OVERWRITE_DEFAULT = args.overwrite
     SSMClient.batch_put(*six.itervalues(parameters))
 
 def delete_main(args=None):
     parser = argparse.ArgumentParser()
     
     parser.add_argument('parameter_file', type=argparse.FileType('r'), nargs='+')
-    parser.add_argument('--input', nargs=2, action='append', default=[])
     
+    defaults = {}
+    
+    add_input_args(parser, defaults, secure=False)
+    add_echo_args(parser, defaults)
+    add_prompt_args(parser, defaults)
+    
+    parser.set_defaults(**defaults)
     args = parser.parse_args(args=args)
     
-    input_values = dict(args.input)
+    inputs = load_inputs_from_args(args)
     
-    parameters = {}
-    flush = []
-    try:
-        for parameter_file in args.parameter_file:
-            six.print_("Processing {}...".format(parameter_file.name))
-            data = parse_parameter_file(yaml.load(parameter_file), input_values)
-            parameters.update(data.parameters)
-            flush.extend(data.flush)
-    except InputError as e:
-        parser.exit(1, '{}\n'.format(e))
+    inputs, parameters, flush_paths = load_parameter_files(args, inputs)
     
-    for path in flush:
-        six.print_("Flushing {}...".format(path))
-        SSMClient.delete_path(path)
+    process_inputs(inputs, prompt=args.prompt, echo=args.echo)
+    
+    flush(flush_paths)
     
     six.print_("Deleting parameters")
     SSMClient.delete(*[p.name for p in six.itervalues(parameters)])
@@ -98,20 +143,15 @@ def download_main(args=None):
     
     args = parser.parse_args(args=args)
     
-    ssm_param_file_data = {}
-    
     flush = args.path
     if len(flush) == 1:
         flush = flush[0]
     
-    ssm_param_file_data[FLUSH_KEY] = flush
-    
+    parameters = []
     for path in args.path:
-        parameters = SSMClient.get_path(path, full=True)
-        for parameter in parameters:
-            data = parameter.dump()
-            name = data.pop('Name')
-            ssm_param_file_data[name] = data
+        parameters.extend(SSMClient.get_path(path, full=True))
+    
+    ssm_param_file_data = compile_parameter_file(parameters, flush)
     
     if not args.output:
         args.output = sys.stdout

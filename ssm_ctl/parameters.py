@@ -4,23 +4,67 @@ import six
 import re
 
 class SSMClient(object):
-    CLIENT_FACTORY = None
+    @classmethod
+    def _default_session_factory(cls):
+        """Default session factory that creates a boto3 session."""
+        import boto3
+        return boto3.session.Session()
+
+    @classmethod
+    def _default_client_factory(cls, session, name):
+        """Default client factory that creates a client from the provided session."""
+        return session.client(name)
+
+    SESSION_FACTORY = _default_session_factory
+    CLIENT_FACTORY = _default_client_factory
+
+    _SESSION = None
     _CLIENT = None
+
+    @classmethod
+    def _session(cls):
+        """Use the defined session factory to create an object that acts like a boto3 session.
+        Defaults to boto3.session.Session(); set SESSION_FACTORY to inject a different session
+        factory.
+        You should not need to call this method yourself; it is meant for internal use."""
+        if cls._SESSION is None:
+            if cls.SESSION_FACTORY:
+                cls._SESSION = cls.SESSION_FACTORY()
+            else:
+                cls._SESSION = cls._default_session_factory()
+        return cls._SESSION
+
+    @classmethod
+    def _client(cls):
+        """Use the defined client factory to create an object that acts like a boto3 client.
+        Defaults to _session().client("ssm"); set CLIENT_FACTORY to inject a different client
+        factory."""
+        if cls._CLIENT is None:
+            if cls.CLIENT_FACTORY:
+                client = cls.CLIENT_FACTORY(cls._session(), "ssm")
+            else:
+                client = cls._default_client_factory(cls._session(), "ssm")
+            cls._CLIENT = client
+        return cls._CLIENT
+    
+    _REGION = None
+    _ACCOUNT = None
     
     @classmethod
-    def get_client(cls, refresh=False):
-        if cls._CLIENT and not refresh:
-            return cls._CLIENT
-        if cls.CLIENT_FACTORY:
-            cls._CLIENT = cls.CLIENT_FACTORY()
-        else:
-            import boto3
-            cls._CLIENT = boto3.client('ssm')
-        return cls._CLIENT
+    def get_region(cls):
+        if not cls._REGION:
+            cls._REGION = cls._session().region_name
+        return cls._REGION
+    
+    @classmethod
+    def get_account(cls):
+        if not cls._ACCOUNT:
+            cls._ACCOUNT = cls._session().client('sts').get_caller_identity()['Account']
+        return cls._ACCOUNT   
     
     @classmethod
     def batch_put(cls, *args):
-        client = cls.get_client()
+        client = cls._client()
         responses = []
         for parameters in _batch(args, 10):
             for parameter in args:
@@ -60,7 +104,7 @@ class SSMClient(object):
                 parameter_versions = cls.get_versions(name, with_decryption=False)
                 parameters.append(parameter_versions[0])
         else:
-            client = cls.get_client()
+            client = cls._client()
             for names in _batch(args, n=10):
                 response = client.get_parameters(
                     names = names,
@@ -74,7 +118,7 @@ class SSMClient(object):
     
     @classmethod
     def get_versions(cls, name):
-        client = cls.get_client()
+        client = cls._client()
         paginator = client.get_paginator('get_parameter_history')
         parameter_versions = []
         
@@ -92,7 +136,7 @@ class SSMClient(object):
     def get_path(cls, path, names_only=False, full=False, recursive=True, parameter_filters=[]):
         if names_only and full:
             raise ValueError("Can't specify both names_only and full")
-        client = cls.get_client()
+        client = cls._client()
         paginator = client.get_paginator('get_parameters_by_path')
         names = []
         parameters = []
@@ -116,7 +160,7 @@ class SSMClient(object):
     
     @classmethod
     def delete(cls, *args):
-        client = cls.get_client()
+        client = cls._client()
         responses = []
         for names in _batch(args, 10):
             response = client.delete_parameters(Names=names)
@@ -131,6 +175,23 @@ class SSMClient(object):
     _MASTER_KEYS = set()
     
     @classmethod
+    def _default_encrypter(cls, plaintext, key_id):
+        import aws_encryption_sdk
+        return aws_encryption_sdk.encrypt(
+                source=plaintext,
+                key_provider=cls.get_master_key_provider(key_id))
+    
+    @classmethod
+    def _default_decrypter(cls, ciphertext, key_id):
+        import aws_encryption_sdk
+        return aws_encryption_sdk.decrypt(
+                source=ciphertext,
+                key_provider=cls.get_master_key_provider(key_id))
+    
+    _ENCRYPTER = _default_encrypter
+    _DECRYPTER = _default_decrypter
+    
+    @classmethod
     def get_master_key_provider(cls, key_id):
         if not cls._MASTER_KEY_PROVIDER:
             import aws_encryption_sdk
@@ -142,22 +203,16 @@ class SSMClient(object):
     
     @classmethod
     def encrypt(cls, plaintext, key_id):
-        import aws_encryption_sdk
-        return aws_encryption_sdk.encrypt(
-            source=plaintext,
-            key_provider=cls.get_master_key_provider(key_id))
+        return cls._ENCRYPTER(plaintext, key_id) 
     
     @classmethod
     def decrypt(cls, ciphertext, key_id):
-        import aws_encryption_sdk
-        return aws_encryption_sdk.decrypt(
-            source=ciphertext,
-            key_provider=cls.get_master_key_provider(key_id))
+        return cls._DECRYPTER(ciphertext, key_id) 
 
 class VarString(object):
     _VAR_NAME_PATTERN_STR = r'\w+'
     _VAR_NAME_PATTERN = re.compile(_VAR_NAME_PATTERN_STR)
-    _REFERENCE_PATTERN_STR = r'(?<=[^\$])\$\(({})\)'.format(_VAR_NAME_PATTERN_STR)
+    _REFERENCE_PATTERN_STR = r'\$\(({})\)'.format(_VAR_NAME_PATTERN_STR)
     _REFERENCE_PATTERN = re.compile(_REFERENCE_PATTERN_STR)
     
     NAMES = set()
@@ -167,7 +222,7 @@ class VarString(object):
     def get_reference_pattern(cls, name=None):
         if name is None:
             return cls._REFERENCE_PATTERN
-        pattern = r'(?<=[^\$])' + re.escape('$({})'.format(name))
+        pattern = re.escape('$({})'.format(name))
         return re.compile(pattern)
     
     @classmethod
@@ -181,7 +236,7 @@ class VarString(object):
     
     @classmethod
     def resolve(cls, resolver):
-        for name in cls.NAMES:
+        for name in sorted(cls.NAMES):
             cls._VAR_VALUES[name] = resolver(name)
     
     @classmethod
@@ -210,11 +265,13 @@ class VarString(object):
     @property
     def value(self):
         if not self._value:
+            value = self.string
             for name in self.names:
                 pattern = self.get_reference_pattern(name)
-                key_id = self.get_value(self._key_id)
-                value = self._VAR_VALUES[name].get_value(key_id=key_id)
-                self._value = pattern.sub(self.string, value)
+                key_id = self.dump(self._key_id)
+                var_value = self._VAR_VALUES[name].get_value(key_id=key_id)
+                value = pattern.sub(var_value, value)
+            self._value = value
         return self._value
     
     def __eq__(self, other):
@@ -234,7 +291,7 @@ class VarString(object):
     
     def __repr__(self):
         value_str = ',value={!r}'.format(self._value) if self._value else ''
-        return 'VarString.load({}{})'.format(self.string, value_str)
+        return 'load_varstring({}{})'.format(self.string, value_str)
 
 class SSMParameter(object):
     NAME_PATTERN = r'^(/[a-zA-Z0-9.-_]+)+$'
@@ -242,7 +299,9 @@ class SSMParameter(object):
     OVERWRITE_DEFAULT = False
     
     @classmethod
-    def load(cls, obj):
+    def load(cls, obj, vars_in_name_only=False):
+        load_varstring = (lambda o, k=None: o) if vars_in_name_only else VarString.load
+        
         name = VarString.load(obj['Name'])
         
         type = obj.get('Type')
@@ -255,32 +314,30 @@ class SSMParameter(object):
                 type = 'String'
             type = 'SecureString' if 'KeyId' in obj else 'String'
         
-        key_id = VarString.load(obj.get('KeyId'))
+        key_id = load_varstring(obj.get('KeyId'))
         
         value = None
         if type == 'SecureString':
             if not key_id:
                 raise ValueError("SecureString requires KeyId")
             if 'EncryptedValue' in obj:
-                value = VarString.load(obj['EncryptedValue'], key_id=key_id)
+                value = load_varstring(obj['EncryptedValue'], key_id=key_id)
             elif 'Input' in obj:
-                value = VarString.load(VarString.single_reference(obj['Input'], key_id=key_id))
+                value = load_varstring(VarString.single_reference(obj['Input']), key_id=key_id)
             elif 'Value' in obj:
                 raise ValueError("Value cannot be used with SecureString")
-        elif 'Value' not in obj:
-            raise ValueError("Value must be provided")
-        elif isinstance(obj['Value'], list):
-            value = [VarString.load(s) for s in obj['Value']]
+        elif isinstance(obj.get('Value'), list):
+            value = [load_varstring(s) for s in obj['Value']]
         else:
-            value = VarString.load(obj['Value'])
+            value = load_varstring(obj.get('Value'))
         
-        allowed_pattern = VarString.load(obj.get('AllowedPattern'))
+        allowed_pattern = load_varstring(obj.get('AllowedPattern'))
         
         description = obj.get('Description')
         
         overwrite = obj.get('Overwrite')
         
-        disable = VarString.load(obj.get('Disable'))
+        disable = load_varstring(obj.get('Disable', obj.get('Disabled')))
         
         parameter = cls(name, type, value,
             allowed_pattern=allowed_pattern,
@@ -320,9 +377,6 @@ class SSMParameter(object):
                  overwrite=None,
                  disable=None):
         
-        if value is None:
-            raise ValueError("Value must be provided")
-        
         self._name = name
         self._type = type
         self._value = value
@@ -338,8 +392,8 @@ class SSMParameter(object):
         self.last_modified_date = None
         self.last_modified_user = None
         
-        if (self.key_id and not self.type == 'SecureString') or (self.type == 'SecureString' and not self.key_id):
-            raise ValueError('Mismatched secure inputs')
+        if (self._key_id and not self._type == 'SecureString') or (self._type == 'SecureString' and not self._key_id):
+            raise ValueError('Mismatched secure inputs on parameter {}'.format(name))
     
     def __str__(self):
         return repr(self)
@@ -369,6 +423,10 @@ class SSMParameter(object):
     
     @property
     def value(self):
+        if self._value is None:
+            if self.disable:
+                return self._value
+            raise ValueError("Value missing for parameter {}".format(self.name))
         value = VarString.dump(self._value)
         if not isinstance(value, six.string_types):
             value = ','.join(VarString.dump(v) for v in self._value)
@@ -434,7 +492,7 @@ class SSMParameterRequirement(object):
             errors.append("allowed pattern {} is invalid".format(parameter.allowed_pattern))
         return not bool(errors), errors
 
-def _batch(iterable, n=1):
+def _batch(iterable, n):
     l = len(iterable)
     for ndx in range(0, l, n):
         yield iterable[ndx:min(ndx + n, l)]

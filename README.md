@@ -35,19 +35,20 @@ An entry in the parameter file looks like:
 
 ```yaml
 /My/Parameter/Name:
-  Value: my_parameter_value
   Type: String | StringList | SecureString
+  Value: my_parameter_value
   KeyId: kms-key-id
   AllowedPattern: regex
   Description: The description of the parameter
   Disable: False
 ```
 
-`Value` is required, all other fields are optional.
-
 `Type` is inferred if not specified. If `Value` is a list, `Type` is `StringList`.
 If `KeyId` is specified, `Type` is `SecureString`.
 Otherwise `Type` is `String`.
+
+`Value` is required for `String` and `StringList`. For `SecureString` parameters,
+see below.
 
 `AllowedPattern` is the SSM API input; it is not used client-side.
 
@@ -80,12 +81,15 @@ Note that you need to specify `--delete` for `ssm-ctl push` to use this function
 
 ### Variables and inputs
 
-A parameter file can use variables to become a template. Variables are used like `$(VarName)`.
-Variables can be present in any string. There are two ways to provide values for variables.
+A parameter file can use inputs to become a template. Input references are used like `$(InputName)`.
+Input references can be present in the name, and the `Value`, `AllowedPattern`, `KeyId`, and `Disable` fields.
+There are two ways to provide values for inputs.
 
-On the command line, inputs can be specified as `--input name value`.
+On the command line, inputs can be specified as `--input NAME VALUE`, or `SecureString` inputs can be specified as `--secure-input NAME` (see below).
 
-In the parameters file, under `.INPUTS`, definitions can be provided to prompt the user for input (if they are not provided on the command line).
+Any input references that do not have corresponding inputs on the command line will prompt the user for values, unless the `--no-prompt` flag is given.
+
+The inputs in a file can be defined under the `.INPUTS` section. A `Type`, `AllowedPattern`, and `Description` can be provided. `Default` can be provided for `String` and `StringList` types.
 
 ```yaml
 .INPUTS:
@@ -94,6 +98,17 @@ In the parameters file, under `.INPUTS`, definitions can be provided to prompt t
     AllowedPattern: ^/\w+$
   Value:
     Type: StringList
+
+$(Prefix)/Name:
+  Value: $(Value)
+```
+
+The `Type` is `String` by default. If only the type is to be given, it can be provided inline:
+
+```yaml
+.INPUTS:
+  Prefix: String
+  Value: StringList
 
 $(Prefix)/Name:
   Value: $(Value)
@@ -112,13 +127,15 @@ Produce a parameter file from the parameters at the given paths, saved to the gi
 ### ssm-ctl push
 
 ```
-ssm-ctl push [--overwrite] [--delete] [--input NAME VALUE]... PARAMETER_FILE...
+ssm-ctl push [--overwrite] [--delete] [--dry-run] [--input NAME VALUE]... PARAMETER_FILE...
 ```
 
 Load the given parameter files and push the parameters to SSM.
 * `--overwrite` Default to overwriting existing parameters
 * `--delete` Flush the paths given in the parameter files before pushing
 * `--input NAME VALUE` Set the variable `NAME` to `VALUE`
+* `--dry-run` Print out the parameter configuration that would be pushed, but do not push it.
+ * Note this may still make KMS calls to decrypt encrypted `SecureString` parameter values.
 
 ### ssm-ctl delete
 
@@ -130,9 +147,24 @@ Load the given parameter files, flush the defined paths, and delete the paramete
 
 ## SecureString parameters
 
-**Note: this is speculate, and is not implemented yet**
+In a `SecureString` parameter, the value can only be stored encrypted, under the `EncryptedValue` field, using the specified `KeyId` (which will also be used for the parameter in SSM). Alternatively, the value can be required to be an input, by putting the name of an input under the `Input` key:
 
-SecureString parameters must be stored encypted in parameter files, using the specified KeyId (which will also be used for the parameter in SSM).
+```yaml
+.Inputs:
+  SecureValue:
+    Type: SecureString
+
+/My/Secure/Param:
+  Type: SecureString
+  Input: SecureValue
+```
+
+If the given input is a `String` input, it must be the encrypted value. If it is a `SecureString` input, the user will be prompted for the unencrypted value. Similarly, to specify the encrypted value on the command line, use `--input NAME ENCRYPTED_VALUE`. To prompt the user for the unecrypted value, use `--secure-input NAME`.
+
+`SecureString` input prompts will normally not echo the user input. To change this, use the `--echo` flag.
+
+** The below is not implemented yet **
+
 To encrypt a value for storage, use
 
 ```
@@ -145,8 +177,4 @@ ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE PATH [PATH]...
 Use the literal path, including any variable references. This will store the encrypted values back in the parameter file.
 To leave the file as-is and simply print out the encrypted values, use the `--print` flag.
 
-If the value of a SecureString parameter is a variable, there are three ways to give the value.
-First, it can be given in the encrypted form, in which case it can be given by `--input` or by a `String` parameter like any other variable.
-Second, the `--secure-input NAME` will prompt for the unencrypted form. 
-Third, in the `.INPUTS` section, the `Type` of an input can be `SecureString`, and this will also prompt for the unencrypted value.
-For both of the prompting methods, the flag `--echo` can be given to show the value when typing.
+
