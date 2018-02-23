@@ -11,11 +11,15 @@ pip install ./ssm-ctl
 
 ### Download your existing parameters
 
-`ssm-ctl download -o ssm.yaml /`
+```
+ssm-ctl download -o ssm.yaml /
+```
 
 ### Push changes
 
-`ssm-ctl push [--overwrite] ssm.yaml`
+```
+ssm-ctl push [--overwrite] ssm.yaml
+```
 
 If there are existing parameters, they won't be overwritten (this is a feature of SSM's API).
 To overwrite any existing parameters, use the `--overwrite` flag. 
@@ -99,13 +103,17 @@ $(Prefix)/Name:
 
 ### ssm-ctl download
 
-`ssm-ctl download [--output FILE] PATH [PATH]...`
+```
+ssm-ctl download [--output FILE] PATH [PATH]...
+```
 
 Produce a parameter file from the parameters at the given paths, saved to the given file or stdout.
 
 ### ssm-ctl push
 
-`ssm-ctl push [--overwrite] [--delete] [--input NAME VALUE]... PARAMETER_FILE...`
+```
+ssm-ctl push [--overwrite] [--delete] [--input NAME VALUE]... PARAMETER_FILE...
+```
 
 Load the given parameter files and push the parameters to SSM.
 * `--overwrite` Default to overwriting existing parameters
@@ -114,6 +122,31 @@ Load the given parameter files and push the parameters to SSM.
 
 ### ssm-ctl delete
 
-`ssm-ctl delete [--input NAME VALUE]... PARAMETER_FILE...`
+```
+ssm-ctl delete [--input NAME VALUE]... PARAMETER_FILE...
+```
 
 Load the given parameter files, flush the defined paths, and delete the parameters.
+
+## SecureString parameters
+
+**Note: this is speculate, and is not implemented yet**
+
+SecureString parameters must be stored encypted in parameter files, using the specified KeyId (which will also be used for the parameter in SSM).
+To encrypt a value for storage, use
+
+```
+ssm-ctl encrypt PARAMETER_FILE PATH VALUE [PATH VALUE]...
+```
+or
+```
+ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE PATH [PATH]...
+```
+Use the literal path, including any variable references. This will store the encrypted values back in the parameter file.
+To leave the file as-is and simply print out the encrypted values, use the `--print` flag.
+
+If the value of a SecureString parameter is a variable, there are three ways to give the value.
+First, it can be given in the encrypted form, in which case it can be given by `--input` or by a `String` parameter like any other variable.
+Second, the `--secure-input NAME` will prompt for the unencrypted form. 
+Third, in the `.INPUTS` section, the `Type` of an input can be `SecureString`, and this will also prompt for the unencrypted value.
+For both of the prompting methods, the flag `--echo` can be given to show the value when typing.

@@ -6,8 +6,8 @@ import argparse
 
 import yaml
 
-from .parameters import SSMParameter, SSMClient
-from .files import parse_parameter_file, InputError, FLUSH_KEY
+from .parameters import SSMParameter, SSMClient, VarString
+from .files import parse_parameter_file, Input, InputError, FLUSH_KEY
 
 def push_main(args=None):
     parser = argparse.ArgumentParser()
@@ -16,21 +16,40 @@ def push_main(args=None):
     parser.add_argument('--overwrite', action='store_true', default=False, help='Allow overwrites by default')
     parser.add_argument('--delete', action='store_true')
     parser.add_argument('--input', nargs=2, action='append', default=[])
+    parser.add_argument('--secure-input', nargs=2, action='append', default=[])
+    parser.add_argument('--echo', action='store_true')
+    parser.add_argument('--no-echo', action='store_false', dest='echo')
+    parser.add_argument('--no-prompt', action='store_false', dest='prompt')
+    parser.set_defaults(prompt=True, echo=None)
     
     args = parser.parse_args(args=args)
     
     SSMParameter.OVERWRITE_DEFAULT = args.overwrite
     
-    input_values = dict(args.input)
+    inputs = {}
+    for input_name, input_value in args.input:
+        input = Input(input_name, 'String')
+        input.set_value(input_value)
+        inputs[input_name] = input
+    
+    for input_name, input_value in args.secure_input:
+        input = Input(input_name, 'SecureString')
+        input.set_value(input_value, encrypted=True)
+        inputs[input_name] = input
     
     parameters = {}
     flush = []
+    for parameter_file in args.parameter_file:
+        six.print_("Processing {}...".format(parameter_file.name))
+        data = parse_parameter_file(yaml.load(parameter_file))
+        Input.merge_inputs(inputs, data.inputs)
+        parameters.update(data.parameters)
+        flush.extend(data.flush)
+    
+    six.print_("Processing inputs...")
     try:
-        for parameter_file in args.parameter_file:
-            six.print_("Processing {}...".format(parameter_file.name))
-            data = parse_parameter_file(yaml.load(parameter_file), input_values)
-            parameters.update(data.parameters)
-            flush.extend(data.flush)
+        resolver = Input.get_resolver(inputs, prompt=args.prompt, echo=args.echo)
+        VarString.resolve(resolver)
     except InputError as e:
         parser.exit(1, '{}\n'.format(e))
     
