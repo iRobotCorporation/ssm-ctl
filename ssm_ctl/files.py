@@ -21,12 +21,8 @@ import six
 from six.moves import input
 
 import re
-import argparse
 import collections
-import sys
 import getpass
-
-import yaml
 
 from .parameters import SSMParameter, SSMClient
 
@@ -118,13 +114,13 @@ class Input(object):
     def value_is_set(self):
         return self._value or self._encrypted_value
     
-    def get_value(self, key_id=None):
-        if key_id:
+    def get_value(self, encrypted=False):
+        if encrypted:
             if not self._decrypted_value:
                 if self._encrypted_value:
-                    self._decrypted_value = SSMClient.decrypt(self._encrypted_value, key_id)
+                    self._decrypted_value = SSMClient.decrypt(self._encrypted_value)
                 else:
-                    self._decrypted_value = SSMClient.decrypt(self._value, key_id)
+                    self._decrypted_value = SSMClient.decrypt(self._value)
             return self._decrypted_value
         else:
             return self._value
@@ -189,7 +185,7 @@ class Input(object):
 
 ParameterFileData = collections.namedtuple('ParameterFileData', ['inputs', 'parameters', 'flush'])
 
-INPUT_KEY = '.INPUT'
+INPUT_KEY = '.INPUTS'
 COMMON_KEY = '.COMMON'
 FLUSH_KEY = '.FLUSH'
 

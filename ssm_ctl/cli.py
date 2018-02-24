@@ -18,8 +18,11 @@ limitations under the License.
 from __future__ import absolute_import, print_function
 
 import six
+from six.moves import input, range
 import sys
 import argparse
+import getpass
+import os.path
 
 import yaml
 
@@ -65,7 +68,7 @@ def load_parameter_files(args, inputs=None):
     flush = []
     for parameter_file in args.parameter_file:
         six.print_("Loading {}...".format(parameter_file.name))
-        data = parse_parameter_file(yaml.load(parameter_file))
+        data = parse_parameter_file(yaml.safe_load(parameter_file))
         Input.merge_inputs(inputs, data.inputs)
         parameters.update(data.parameters)
         flush.extend(data.flush)
@@ -173,13 +176,87 @@ def download_main(args=None):
     if not args.output:
         args.output = sys.stdout
     
-    yaml.dump(ssm_param_file_data, args.output, default_flow_style=False)
+    yaml.safe_dump(ssm_param_file_data, args.output, default_flow_style=False)
+
+def encrypt_main(args=None):
+    """
+    ssm-ctl encrypt PARAMETER_FILE PATH VALUE [PATH VALUE]...
+    ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE PATH [PATH]...
+    """
+    
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument('parameter_file')
+    parser.add_argument('key_id')
+    parser.add_argument('args', nargs='+')
+    prompt_group = parser.add_argument_group()
+    prompt_group.add_argument('--prompt', action='store_true')
+    prompt_group.add_argument('--echo', action='store_true')
+    
+    args = parser.parse_args(args=args)
+    
+    input_fn = getpass.getpass if not args.echo else input
+    
+    if os.path.exists(args.parameter_file):
+        with open(args.parameter_file, 'r') as fp:
+            parameter_file = yaml.safe_load(fp)
+    else:
+        parameter_file = {}
+    
+    if not args.key_id.startswith('arn'):
+        args.key_id = 'arn:aws:kms:{}:{}:{}'.format(
+            SSMClient.get_region(),
+            SSMClient().get_account(),
+            args.key_id)
+    
+    data = {}
+    if not args.prompt:
+        if not len(args.args) % 2 == 0:
+            parser.error("Provide a value for every path")
+        for i in range(0, len(args.args), 2):
+            data[args.args[i]] = SSMClient.encrypt(args.args[i+1], args.key_id)
+    else:
+        for path in args.args:
+            value = input_fn('{}: '.format(path))
+            data[path] = SSMClient.encrypt(value, args.key_id)
+    
+    for path, value in six.iteritems(data):
+        data = {
+            'EncryptedValue': value,
+            'KeyId': args.key_id,
+        }
+        if path not in parameter_file:
+            parameter_file[path] = data
+        if path in parameter_file:
+            if not isinstance(parameter_file[path], dict):
+                parameter_file[path] = {}
+            parameter_file[path].update(data)
+    
+    with open(args.parameter_file, 'w') as fp:
+        yaml.safe_dump(parameter_file, fp, default_flow_style=False)
+    
+def decrypt_main(args=None):
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument('parameter_file', type=argparse.FileType('r'))
+    
+    args = parser.parse_args(args=args)
+    
+    parameter_file = yaml.safe_load(args.parameter_file)
+    
+    for path, data in six.iteritems(parameter_file):
+        if isinstance(data, dict) and 'EncryptedValue' in data:
+            ciphertext = data['EncryptedValue']
+            key_id = data.get('KeyId')
+            plaintext = SSMClient.decrypt(ciphertext, key_id)
+            six.print_('{}: {}'.format(path, plaintext))
+    
 
 def main(args=None):
     if args is None:
         args = sys.argv[1:]
     
-    commands = ['push', 'delete', 'download']
+    commands = ['push', 'delete', 'download', 'encrypt', 'decrypt']
     
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=commands)

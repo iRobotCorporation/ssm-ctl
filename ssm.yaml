@@ -1,4 +1,4 @@
-.INPUT:
+.INPUTS:
   StringInput:
     Type: String
   StringInputWithPattern:

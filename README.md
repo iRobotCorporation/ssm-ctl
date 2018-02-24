@@ -114,6 +114,8 @@ $(Prefix)/Name:
   Value: $(Value)
 ```
 
+The inputs `Account` and `Region` are available by default, corresponding to the configured AWS account and region. If the `Account` input is referenced and it is not overridden on the command line, `ssm-ctl` will make a call to STS.GetCallerIdentity to retrieve the account number.
+
 ## The ssm-ctl tool
 
 ### ssm-ctl download
@@ -147,7 +149,7 @@ Load the given parameter files, flush the defined paths, and delete the paramete
 
 ## SecureString parameters
 
-In a `SecureString` parameter, the value can only be stored encrypted, under the `EncryptedValue` field, using the specified `KeyId` (which will also be used for the parameter in SSM). Alternatively, the value can be required to be an input, by putting the name of an input under the `Input` key:
+In a `SecureString` parameter, the value can only be stored encrypted, under the `EncryptedValue` field. Alternatively, the value can be required to be an input, by putting the name of an input under the `Input` key:
 
 ```yaml
 .Inputs:
@@ -159,21 +161,33 @@ In a `SecureString` parameter, the value can only be stored encrypted, under the
   Input: SecureValue
 ```
 
-If the given input is a `String` input, it must be the encrypted value. If it is a `SecureString` input, the user will be prompted for the unencrypted value. Similarly, to specify the encrypted value on the command line, use `--input NAME ENCRYPTED_VALUE`. To prompt the user for the unecrypted value, use `--secure-input NAME`.
+If the given input is a `String` input, it must be an encrypted value. If it is a `SecureString` input, the user will be prompted for the unencrypted value. Similarly, to specify the encrypted value on the command line, use `--input NAME ENCRYPTED_VALUE`. To prompt the user for the unecrypted value, use `--secure-input NAME`. `SecureString` and `--secure-input` prompts will normally not echo the user input. To change this, use the `--echo` flag.
 
-`SecureString` input prompts will normally not echo the user input. To change this, use the `--echo` flag.
-
-** The below is not implemented yet **
+Encrypted values must be encrypted using KMS or the [AWS Encryption SDK](https://docs.aws.amazon.com/encryption-sdk/latest/developer-guide/programming-languages.html). They don't need to use the same key that is specified for the parameter.
 
 To encrypt a value for storage, use
 
 ```
-ssm-ctl encrypt PARAMETER_FILE PATH VALUE [PATH VALUE]...
+ssm-ctl encrypt PARAMETER_FILE KEY_ID PATH VALUE [PATH VALUE]...
 ```
 or
 ```
-ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE PATH [PATH]...
+ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE KEY_ID PATH [PATH]...
 ```
-Use the literal path, including any variable references. This will store the encrypted values back in the parameter file.
-To leave the file as-is and simply print out the encrypted values, use the `--print` flag.
+If the parameter file already exists, use the literal paths, including any variable references. This will store the encrypted values back in the parameter file.
 
+The key id can be provided as an ARN or as `key/{key-id}` or `alias/{alias-name}`, which will use the current account and region from boto3.
+
+To decrypt the values in a parameter file and print them to stdout, use
+
+```
+ssm-ctl decrypt PARAMETER_FILE
+```
+
+### Permissions
+
+For `ssm-ctl push`, you need `kms:Encrypt` permission for the `KeyId`s you have specified. For any encrypted value in the parameter file or input on the command line, you must have `kms:Decrypt` permissions for the associated key.
+
+For `ssm-ctl download`, you currently need both `kms:Decrypt` and `kms:Encrypt` permission for the keys associated with the parameters you are accessing. This is because the encrypted format returned by SSM is not in AWS Encryption SDK format, so `ssm-ctl` converts it to plaintext and reencrypts it.
+
+For `ssm-ctl encrypt` and `ssm-ctl decrypt`, you must have 

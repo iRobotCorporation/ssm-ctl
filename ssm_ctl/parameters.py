@@ -19,6 +19,7 @@ from __future__ import absolute_import, print_function
 
 import six
 import re
+import base64
 
 class SSMClient(object):
     @classmethod
@@ -90,7 +91,7 @@ class SSMClient(object):
                 kwargs = {
                     'Name': parameter.name,
                     'Type': parameter.type,
-                    'Value': parameter.value,
+                    'Value': parameter.get_value(),
                 }
                 
                 if parameter.allowed_pattern:
@@ -109,48 +110,64 @@ class SSMClient(object):
                     **kwargs
                     )
                 responses.append(response)
-        
+    
+    @classmethod
+    def _load_parameters_from_response(cls, response, reencrypt, limit=None):
+        parameters = []
+        for i, item in enumerate(response['Parameters']):
+            if limit is not None and i > limit:
+                break
+            if reencrypt and item['Type'] == 'SecureString':
+                item['EncryptedValue'] = SSMClient.encrypt(item.pop('Value'), item['KeyId'])
+            parameter = SSMParameter.load(item, allow_secure_string_value=True)
+            parameters.append(parameter)
+        return parameters
+    
     @classmethod
     def get(cls, *args, **kwargs):
         invalid_parameter_names = []
         parameters = []
         
+        reencrypt = kwargs.get('reencrypt', True)
+        
         if kwargs.get('full', False):
             #TODO: catch exceptions, store as invalid
             for name in args:
-                parameter_versions = cls.get_versions(name, with_decryption=False)
+                parameter_versions = cls.get_versions(name, reencrypt=reencrypt, limit=1)
                 parameters.append(parameter_versions[0])
         else:
             client = cls._client()
             for names in _batch(args, n=10):
                 response = client.get_parameters(
-                    names = names,
-                    with_decryption=False)
+                    Names=names,
+                    WithDecryption=reencrypt)
                 invalid_parameter_names.extend(response['InvalidParameters'])
-                parameters.extend(SSMParameter.load(p) for p in response['Parameters'])
+                parameters.extend(cls._load_parameters_from_response(response, reencrypt))
         
         if invalid_parameter_names:
             raise KeyError("Invalid parameter names {}".format(', '.join(invalid_parameter_names)))
         return parameters
     
     @classmethod
-    def get_versions(cls, name):
+    def get_versions(cls, name, reencrypt=True, limit=None):
         client = cls._client()
         paginator = client.get_paginator('get_parameter_history')
         parameter_versions = []
         
         for response in paginator.paginate(
                 Name=name,
-                WithDecryption=False):
-            for item in response['Parameters']:
-                parameter = SSMParameter.load(item)
-                parameter_versions.append(parameter)
+                WithDecryption=reencrypt):
+            load_limit = None
+            if limit is not None:
+                load_limit = limit - len(parameter_versions)
+            
+            parameter_versions.extend(cls._load_parameters_from_response(response, reencrypt=reencrypt, limit=load_limit))
         
         parameter_versions.sort(key=lambda p: p.version, reverse=True)
         return parameter_versions
     
     @classmethod
-    def get_path(cls, path, names_only=False, full=False, recursive=True, parameter_filters=[]):
+    def get_path(cls, path, names_only=False, full=False, recursive=True, reencrypt=True, parameter_filters=[]):
         if names_only and full:
             raise ValueError("Can't specify both names_only and full")
         client = cls._client()
@@ -162,16 +179,16 @@ class SSMClient(object):
                 Path=path,
                 Recursive=recursive,
                 ParameterFilters=parameter_filters,
-                WithDecryption=False):
+                WithDecryption=reencrypt):
             if names_only or full:
                 names.extend(item['Name'] for item in response['Parameters'])
             else:
-                parameters.extend(SSMParameter.load(item) for item in response['Parameters'])
+                parameters.extend(cls._load_parameters_from_response(response, reencrypt))
         
         if names_only:
             return names
         elif full:
-            return cls.get(*names, full=True)
+            return cls.get(*names, full=True, reencrypt=reencrypt)
         else:
             return parameters
     
@@ -194,26 +211,32 @@ class SSMClient(object):
     @classmethod
     def _default_encrypter(cls, plaintext, key_id):
         import aws_encryption_sdk
-        return aws_encryption_sdk.encrypt(
+        ciphertext, _ = aws_encryption_sdk.encrypt(
                 source=plaintext,
                 key_provider=cls.get_master_key_provider(key_id))
+        return base64.b64encode(ciphertext)
     
     @classmethod
-    def _default_decrypter(cls, ciphertext, key_id):
+    def _default_decrypter(cls, ciphertext):
         import aws_encryption_sdk
-        return aws_encryption_sdk.decrypt(
-                source=ciphertext,
-                key_provider=cls.get_master_key_provider(key_id))
+        plaintext, _ = aws_encryption_sdk.decrypt(
+                source=base64.b64decode(ciphertext),
+                key_provider=cls.get_master_key_provider())
+        return plaintext
+    
+    @classmethod
+    def _fake_decrypter(cls, ciphertext):
+        return '[decrypted]{}'.format(ciphertext)
     
     _ENCRYPTER = _default_encrypter
     _DECRYPTER = _default_decrypter
     
     @classmethod
-    def get_master_key_provider(cls, key_id):
+    def get_master_key_provider(cls, key_id=None):
         if not cls._MASTER_KEY_PROVIDER:
             import aws_encryption_sdk
             cls._MASTER_KEY_PROVIDER = aws_encryption_sdk.KMSMasterKeyProvider()
-        if key_id not in cls._MASTER_KEYS:
+        if key_id and key_id not in cls._MASTER_KEYS:
             cls._MASTER_KEY_PROVIDER.add_master_key(key_id)
             cls._MASTER_KEYS.add(key_id)
         return cls._MASTER_KEY_PROVIDER
@@ -223,8 +246,8 @@ class SSMClient(object):
         return cls._ENCRYPTER(plaintext, key_id) 
     
     @classmethod
-    def decrypt(cls, ciphertext, key_id):
-        return cls._DECRYPTER(ciphertext, key_id) 
+    def decrypt(cls, ciphertext):
+        return cls._DECRYPTER(ciphertext)
 
 class VarString(object):
     _VAR_NAME_PATTERN_STR = r'\w+'
@@ -244,10 +267,11 @@ class VarString(object):
     
     @classmethod
     def single_reference(cls, s):
-        match = cls._REFERENCE_PATTERN.fullmatch(s)
-        if match:
+        match = cls._REFERENCE_PATTERN.match(s)
+        if match and match.group() == s:
             return s
-        if cls._VAR_NAME_PATTERN.fullmatch(s):
+        match = cls._VAR_NAME_PATTERN.match(s)
+        if match and match.group() == s:
             return '$({})'.format(s)
         raise ValueError("{} is not a valid single reference".format(s))
     
@@ -257,36 +281,35 @@ class VarString(object):
             cls._VAR_VALUES[name] = resolver(name)
     
     @classmethod
-    def load(cls, obj, key_id=None):
+    def load(cls, obj, encrypted=None):
         if not isinstance(obj, six.string_types):
             return obj
-        return cls(obj, key_id)
+        return cls(obj, encrypted)
     
     @classmethod
-    def dump(cls, obj):
+    def dump(cls, obj, decrypt=True):
         if isinstance(obj, cls):
-            return obj.value
+            return obj.get_value(decrypt=decrypt)
         else:
             return obj
     
-    def __init__(self, s, key_id):
+    def __init__(self, s, encrypted):
         self.string = s
         
         self.names = self.get_reference_pattern().findall(s)
         self.NAMES.update(self.names)
         
-        self._key_id = key_id
+        self._encrypted = encrypted
         
         self._value = None if self.names else self.string
     
-    @property
-    def value(self):
+    def get_value(self, decrypt=True):
         if not self._value:
             value = self.string
             for name in self.names:
                 pattern = self.get_reference_pattern(name)
-                key_id = self.dump(self._key_id)
-                var_value = self._VAR_VALUES[name].get_value(key_id=key_id)
+                encrypted = self._encrypted if decrypt else False
+                var_value = self._VAR_VALUES[name].get_value(encrypted=encrypted)
                 value = pattern.sub(var_value, value)
             self._value = value
         return self._value
@@ -316,7 +339,7 @@ class SSMParameter(object):
     OVERWRITE_DEFAULT = False
     
     @classmethod
-    def load(cls, obj, vars_in_name_only=False):
+    def load(cls, obj, vars_in_name_only=False, allow_secure_string_value=False):
         load_varstring = (lambda o, k=None: o) if vars_in_name_only else VarString.load
         
         name = VarString.load(obj['Name'])
@@ -334,15 +357,20 @@ class SSMParameter(object):
         key_id = load_varstring(obj.get('KeyId'))
         
         value = None
+        encrypted = False
         if type == 'SecureString':
             if not key_id:
                 raise ValueError("SecureString requires KeyId")
             if 'EncryptedValue' in obj:
-                value = load_varstring(obj['EncryptedValue'], key_id=key_id)
+                value = load_varstring(obj['EncryptedValue'])
+                encrypted = True
             elif 'Input' in obj:
-                value = load_varstring(VarString.single_reference(obj['Input']), key_id=key_id)
+                value = load_varstring(VarString.single_reference(obj['Input']), encrypted=True)
             elif 'Value' in obj:
-                raise ValueError("Value cannot be used with SecureString")
+                if allow_secure_string_value:
+                    value = obj['Value']
+                else:
+                    raise ValueError("Value cannot be used with SecureString")
         elif isinstance(obj.get('Value'), list):
             value = [load_varstring(s) for s in obj['Value']]
         else:
@@ -361,7 +389,8 @@ class SSMParameter(object):
             description=description,
             key_id=key_id,
             overwrite=overwrite,
-            disable=disable)
+            disable=disable,
+            encrypted=encrypted)
         
         parameter.version = obj.get('Version')
         parameter.last_modified_date = obj.get('LastModifiedDate')
@@ -373,8 +402,11 @@ class SSMParameter(object):
         data = {
             'Name': self.name,
             'Type': self.type,
-            'Value': self.value,
         }
+        if self.type == 'SecureString' and self._encrypted:
+            data['EncryptedValue'] = self.get_value(decrypt=False)
+        else:
+            data['Value'] = self.get_value()
         
         if self.allowed_pattern:
             data['AllowedPattern'] = self.allowed_pattern
@@ -392,11 +424,13 @@ class SSMParameter(object):
                  description=None,
                  key_id=None,
                  overwrite=None,
-                 disable=None):
+                 disable=None,
+                 encrypted=None):
         
         self._name = name
         self._type = type
         self._value = value
+        self._resolved_value = None
         
         self._allowed_pattern = allowed_pattern
         self._description = description
@@ -404,6 +438,8 @@ class SSMParameter(object):
         self._overwrite = overwrite
         
         self._disable = disable
+        
+        self._encrypted = encrypted
         
         self.version = None
         self.last_modified_date = None
@@ -419,7 +455,7 @@ class SSMParameter(object):
         kwargs=[
             'name={!r}'.format(self.name),
             'type={!r}'.format(self.type),
-            'value={!r}'.format(self.value),
+            'value={!r}'.format(self.get_value(decrypt=False)),
         ]
         for name in ['allowed_pattern', 'description', 'key_id', 'overwrite', 'disable']:
             if getattr(self, name):
@@ -438,16 +474,19 @@ class SSMParameter(object):
     def type(self):
         return self._type
     
-    @property
-    def value(self):
-        if self._value is None:
-            if self.disable:
-                return self._value
-            raise ValueError("Value missing for parameter {}".format(self.name))
-        value = VarString.dump(self._value)
-        if not isinstance(value, six.string_types):
-            value = ','.join(VarString.dump(v) for v in self._value)
-        return value
+    def get_value(self, decrypt=True):
+        if not self._resolved_value:
+            if self._value is None:
+                if self.disable:
+                    return self._value
+                raise ValueError("Value missing for parameter {}".format(self.name))
+            value = VarString.dump(self._value, decrypt=decrypt)
+            if not isinstance(value, six.string_types):
+                value = ','.join(VarString.dump(v, decrypt=decrypt) for v in self._value)
+            if self._encrypted and decrypt:
+                value = SSMClient.decrypt(value)
+            self._resolved_value = value
+        return self._resolved_value
     
     @property
     def allowed_pattern(self):
