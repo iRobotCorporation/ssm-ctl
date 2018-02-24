@@ -1,10 +1,21 @@
 from setuptools import setup
 
+def get_version(name):
+    import os.path
+    path = os.path.join(name, '_version')
+    if not os.path.exists(path):
+        return "0.0.0"
+    with open(path) as f:
+        return f.read().strip()
+
 setup(
     name='ssm-ctl',
-    version='0.1.0',
+    version=get_version('ssm_ctl'),
     description='Manage your AWS SSM parameters',
     packages=["ssm_ctl"],
+    package_data={
+        "ssm_ctl": ["_version"]
+    },
     entry_points={
         'console_scripts': [
             'ssm-ctl = ssm_ctl.cli:main'
@@ -27,6 +38,7 @@ setup(
         'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
         'License :: OSI Approved :: Apache Software License',
     ),
     keywords='aws ssm',
