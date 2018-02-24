@@ -1,1 +1,3 @@
 pyyaml
+aws_encryption_sdk
+boto3

@@ -85,7 +85,7 @@ class SSMClient(object):
         client = cls._client()
         responses = []
         for parameters in _batch(args, 10):
-            for parameter in args:
+            for parameter in parameters:
                 if parameter.disable:
                     continue
                 kwargs = {
