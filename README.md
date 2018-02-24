@@ -177,4 +177,3 @@ ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE PATH [PATH]...
 Use the literal path, including any variable references. This will store the encrypted values back in the parameter file.
 To leave the file as-is and simply print out the encrypted values, use the `--print` flag.
 
-
