@@ -26,8 +26,14 @@ import os.path
 
 import yaml
 
-from .parameters import SSMParameter, SSMClient, VarString
+from .ssm import SSMClient
+from .parameters import SSMParameter, VarString
 from .files import parse_parameter_file, Input, InputError, ParameterFileData, compile_parameter_file
+
+def add_common_args(parser, defaults):
+    verbose_group = parser.add_mutually_exclusive_group()
+    verbose_group.add_argument('--quiet', '-q', action='store_const', const=-1, dest='verbose')
+    verbose_group.add_argument('--verbose', '-v', action='count')
 
 def add_input_args(parser, defaults, secure=True):
     input_group = parser.add_argument_group()
@@ -61,20 +67,20 @@ def add_prompt_args(parser, defaults):
     prompt_group.add_argument('--no-prompt', action='store_false', dest='prompt')
     defaults['prompt'] = True
 
-def load_parameter_files(args, inputs=None):
+def load_parameter_files(parameter_files, inputs=None, var_mode='all', args=None):
     if inputs is None:
         inputs = {}
     parameters = {}
-    flush = []
-    for parameter_file in args.parameter_file:
+    base_paths = []
+    for parameter_file in parameter_files:
         six.print_("Loading {}...".format(parameter_file.name))
-        data = parse_parameter_file(yaml.safe_load(parameter_file))
+        data = parse_parameter_file(yaml.safe_load(parameter_file), var_mode=var_mode)
         Input.merge_inputs(inputs, data.inputs)
         parameters.update(data.parameters)
-        flush.extend(data.flush)
-    return ParameterFileData(inputs, parameters, flush)
+        base_paths.extend(data.base_paths)
+    return ParameterFileData(inputs, parameters, base_paths)
 
-def process_inputs(inputs, prompt, echo):
+def process_inputs(inputs, prompt, echo, args=None):
     try:
         six.print_("Processing inputs...")
         resolver = Input.get_resolver(inputs, prompt=prompt, echo=echo)
@@ -83,18 +89,32 @@ def process_inputs(inputs, prompt, echo):
         sys.stderr.write('{}\n'.format(e))
         sys.exit(1)
 
-def flush(paths):
+def flush(paths, names, args=None):
     for path in paths:
-        six.print_("Flushing {}...".format(path))
-        SSMClient.delete_path(path)
+        six.print_("Flushing base path {}...".format(path))
+        diff = SSMClient.diff_path(path, names)
+        SSMClient.delete(diff.remove)
 
-def push_main(args=None):
-    parser = argparse.ArgumentParser()
+def print_diff(diff, args=None):
+    lines = []
+        
+    lines.append('*** PARAMETERS TO ADD ***')
+    lines.extend(diff.add)
+    lines.append('')
     
+    lines.append('*** PARAMETERS TO OVERWRITE ***')
+    lines.extend(diff.overwrite)
+    lines.append('')
+    
+    lines.append('*** PARAMETERS TO REMOVE ***')
+    lines.extend(diff.remove)
+    six.print_('\n'.join(lines))
+
+def _load_files_main_helper(parser, args, add_parser_args=None, load_parameter_files_kwargs={}):
     parser.add_argument('parameter_file', type=argparse.FileType('r'), nargs='+')
-    parser.add_argument('--overwrite', action='store_true', default=False, help='Allow overwrites by default')
-    parser.add_argument('--delete', action='store_true')
-    parser.add_argument('--dry-run', action='store_true')
+    
+    if add_parser_args:
+        add_parser_args(parser)
     
     defaults = {}
     
@@ -107,71 +127,103 @@ def push_main(args=None):
     
     inputs = load_inputs_from_args(args)
     
-    inputs, parameters, flush_paths = load_parameter_files(args, inputs)
+    inputs, parameters, base_paths = load_parameter_files(args.parameter_file, inputs=inputs, args=args, **load_parameter_files_kwargs)
     
-    process_inputs(inputs, prompt=args.prompt, echo=args.echo)
+    process_inputs(inputs, prompt=args.prompt, echo=args.echo, args=args)
     
+    names = SSMParameter.get_names(six.itervalues(parameters))
+    
+    base_paths = [VarString.dump(p) for p in base_paths]
+    
+    return args, names, parameters, base_paths
+
+def push_main(args=None):
+    def add_parser_args(parser):
+        parser.add_argument('--overwrite', action='store_true', default=False, help='Allow overwrites by default')
+        parser.add_argument('--delete', action='store_true')
+        
+        parser.add_argument('--dry-run', action='store_true')
+        parser.add_argument('--diff', action='store_true')
+    
+    parser = argparse.ArgumentParser()
+    
+    args, names, parameters, base_paths = _load_files_main_helper(parser, args, add_parser_args=add_parser_args)
+    
+    if args.diff:
+        diff = SSMClient.diff_paths(base_paths, names)
+
     if args.dry_run:
         kwargs = {
             'ignore_disabled': True
         }
-        if args.delete:
-            kwargs['flush'] = flush_paths
         data = compile_parameter_file(six.itervalues(parameters), **kwargs)
+        
         six.print_('*** PARAMETERS TO PUSH ***')
         six.print_(yaml.dump(data, default_flow_style=False))
+
+        if args.diff:
+            print_diff(diff, args=args)
         return
     
+    if args.diff:
+        print_diff(diff, args=args)
+    
     if args.delete:
-        six.print_("Flushing existing parameters...")
-        flush(flush_paths)
+        six.print_("Processing removed parameters...")
+        flush(base_paths, names, args=args)
     
     six.print_("Putting parameters")
     SSMParameter.OVERWRITE_DEFAULT = args.overwrite
-    SSMClient.batch_put(*six.itervalues(parameters))
+    SSMClient.batch_put(list(six.itervalues(parameters)), dumper=SSMParameter.ssm_client_dumper)
+
+def diff_main(args=None):
+    parser = argparse.ArgumentParser()
+    
+    load_parameter_files_kwargs = {
+        'var_mode': 'reduced'
+    }
+    
+    args, names, parameters, base_paths = _load_files_main_helper(parser, args, load_parameter_files_kwargs=load_parameter_files_kwargs)
+    
+    diff = SSMClient.diff_paths(base_paths, names)
+    
+    print_diff(diff, args=args)
 
 def delete_main(args=None):
     parser = argparse.ArgumentParser()
     
-    parser.add_argument('parameter_file', type=argparse.FileType('r'), nargs='+')
+    load_parameter_files_kwargs = {
+        'var_mode': 'reduced'
+    }
     
-    defaults = {}
+    args, names, parameters, base_paths = _load_files_main_helper(parser, args, load_parameter_files_kwargs=load_parameter_files_kwargs)
     
-    add_input_args(parser, defaults, secure=False)
-    add_echo_args(parser, defaults)
-    add_prompt_args(parser, defaults)
-    
-    parser.set_defaults(**defaults)
-    args = parser.parse_args(args=args)
-    
-    inputs = load_inputs_from_args(args)
-    
-    inputs, parameters, flush_paths = load_parameter_files(args, inputs)
-    
-    process_inputs(inputs, prompt=args.prompt, echo=args.echo)
-    
-    flush(flush_paths)
+    flush(base_paths, names, args=args)
     
     six.print_("Deleting parameters")
-    SSMClient.delete(*[p.name for p in six.itervalues(parameters)])
+    SSMClient.delete(names)
 
 def download_main(args=None):
     parser = argparse.ArgumentParser()
     
     parser.add_argument('path', nargs='+')
     parser.add_argument('--output', '-o', type=argparse.FileType('w'))
+    parser.add_argument('--reencrypt-key-id')
     
     args = parser.parse_args(args=args)
     
-    flush = args.path
-    if len(flush) == 1:
-        flush = flush[0]
+    if args.reencrypt_key_id:
+        SSMClient.set_reencrypt_key(args.reencrypt_key_id)
+    
+    base_paths = args.path
+    if len(base_paths) == 1:
+        base_paths = base_paths[0]
     
     parameters = []
     for path in args.path:
-        parameters.extend(SSMClient.get_path(path, full=True))
+        parameters.extend(SSMClient.get_path(path, full=True, loader=SSMParameter.ssm_client_loader))
     
-    ssm_param_file_data = compile_parameter_file(parameters, flush)
+    ssm_param_file_data = compile_parameter_file(parameters, base_paths)
     
     if not args.output:
         args.output = sys.stdout
@@ -203,11 +255,7 @@ def encrypt_main(args=None):
     else:
         parameter_file = {}
     
-    if not args.key_id.startswith('arn'):
-        args.key_id = 'arn:aws:kms:{}:{}:{}'.format(
-            SSMClient.get_region(),
-            SSMClient().get_account(),
-            args.key_id)
+    args.key_id = SSMClient.format_key_id(args.key_id)
     
     data = {}
     if not args.prompt:
@@ -256,7 +304,7 @@ def main(args=None):
     if args is None:
         args = sys.argv[1:]
     
-    commands = ['push', 'delete', 'download', 'encrypt', 'decrypt']
+    commands = ['push', 'diff', 'delete', 'download', 'encrypt', 'decrypt']
     
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=commands)

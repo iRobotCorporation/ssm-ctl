@@ -18,11 +18,12 @@ ssm-ctl download -o ssm.yaml /
 ### Push changes
 
 ```
-ssm-ctl push [--overwrite] ssm.yaml
+ssm-ctl push [--overwrite] [--delete] ssm.yaml
 ```
 
 If there are existing parameters, they won't be overwritten (this is a feature of SSM's API).
-To overwrite any existing parameters, use the `--overwrite` flag. 
+To overwrite any existing parameters, use the `--overwrite` flag.
+To delete any parameters that you have removed, use the `--delete` flag (with care!)
 
 ## The SSM parameters file
 
@@ -63,26 +64,24 @@ Only `Value` is required. If only `Value` would be specified, it can be given in
 - value_2
 ```
 
-### Paths to flush
-
-You can define paths to remove in advance of setting your parameters.
-This is often the common prefix of your parameters. These paths are set with the `.FLUSH` key, either a string or a list of strings
+### Base paths
 
 ```yaml
-.FLUSH: /My
+.BASEPATH: /My
 
-/My/Parameter/Name: ...
-/My/OtherParameter: ...
+Parameter/Name: ... # /My/Parameter/Name
+OtherParameter: ... # /My/OtherParameter
+/Separate/Path: ... # /Separate/Path
 ```
 
-A existing parameter `/My/SeparateParameter`, whether from a previous `ssm-ctl push` or another source, would get deleted.
+If all (or most) of your parameters share a common prefix, you can use `.BASEPATH` to specify that prefix. This path will added to all parameters whose names *do not start with a slash*.
 
-Note that you need to specify `--delete` for `ssm-ctl push` to use this functionality. `ssm-ctl delete` will use it always.
+This also enables diff-ing functionality, which also allows you to delete parameters you've removed from the file (see below).
 
 ### Variables and inputs
 
 A parameter file can use inputs to become a template. Input references are used like `$(InputName)`.
-Input references can be present in the name, and the `Value`, `AllowedPattern`, `KeyId`, and `Disable` fields.
+Input references can be present in the name (including `.BASEPATH`), and the `Value`, `AllowedPattern`, `KeyId`, and `Disable` fields.
 There are two ways to provide values for inputs.
 
 On the command line, inputs can be specified as `--input NAME VALUE`, or `SecureString` inputs can be specified as `--secure-input NAME` (see below).
@@ -129,27 +128,36 @@ Produce a parameter file from the parameters at the given paths, saved to the gi
 ### ssm-ctl push
 
 ```
-ssm-ctl push [--overwrite] [--delete] [--dry-run] [--input NAME VALUE]... PARAMETER_FILE...
+ssm-ctl push [--overwrite] [--delete] [--dry-run] [--input NAME VALUE]... [--secure-input NAME]... PARAMETER_FILE...
 ```
 
 Load the given parameter files and push the parameters to SSM.
 * `--overwrite` Default to overwriting existing parameters
-* `--delete` Flush the paths given in the parameter files before pushing
+* `--delete` Delete parameters as found by the diff (see below).
 * `--input NAME VALUE` Set the variable `NAME` to `VALUE`
 * `--dry-run` Print out the parameter configuration that would be pushed, but do not push it.
+* `--diff` Print out the diff (see below).
  * Note this may still make KMS calls to decrypt encrypted `SecureString` parameter values.
+
+### ssm-ctl diff
+
+```
+ssm-ctl diff [--input NAME VALUE]... [--secure-input NAME]... PARAMETER_FILE...
+```
+
+Diff the parameters against the existing parameters in SSM. Any `.BASEPATH`s specified in the files will be searched for existing parameters, allowing parameters not present in the files to be identified as removed. This mechanism is used for the `--delete` flag in `ssm-ctl push`. 
 
 ### ssm-ctl delete
 
 ```
-ssm-ctl delete [--input NAME VALUE]... PARAMETER_FILE...
+ssm-ctl delete [--input NAME VALUE]... [--secure-input NAME]... PARAMETER_FILE...
 ```
 
 Load the given parameter files, flush the defined paths, and delete the parameters.
 
 ## SecureString parameters
 
-In a `SecureString` parameter, the value can only be stored encrypted, under the `EncryptedValue` field. Alternatively, the value can be required to be an input, by putting the name of an input under the `Input` key:
+In a `SecureString` parameter, the value can only be stored encrypted, base64 encoded, under the `EncryptedValue` field. Alternatively, the value can be required to be an input, by putting the name of an input under the `Input` key:
 
 ```yaml
 .Inputs:
@@ -165,14 +173,14 @@ If the given input is a `String` input, it must be an encrypted value. If it is 
 
 Encrypted values must be encrypted using KMS or the [AWS Encryption SDK](https://docs.aws.amazon.com/encryption-sdk/latest/developer-guide/programming-languages.html). They don't need to use the same key that is specified for the parameter.
 
-To encrypt a value for storage, use
+To encrypt a value to put in a parameter file, you can use the [AWS Encryption SDK CLI tool](https://docs.aws.amazon.com/encryption-sdk/latest/developer-guide/crypto-cli-how-to.html#crypto-cli-e-d-intro) and put the base64-encoded value into your parameter file, or you can use the `ssm-ctl encrypt` utility:
 
 ```
-ssm-ctl encrypt PARAMETER_FILE KEY_ID PATH VALUE [PATH VALUE]...
+ssm-ctl encrypt PARAMETER_FILE KEY_ID NAME PLAINTEXT_VALUE [NAME PLAINTEXT_VALUE]...
 ```
 or
 ```
-ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE KEY_ID PATH [PATH]...
+ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE KEY_ID NAME [NAME]...
 ```
 If the parameter file already exists, use the literal paths, including any variable references. This will store the encrypted values back in the parameter file.
 
@@ -190,4 +198,4 @@ For `ssm-ctl push`, you need `kms:Encrypt` permission for the `KeyId`s you have 
 
 For `ssm-ctl download`, you currently need both `kms:Decrypt` and `kms:Encrypt` permission for the keys associated with the parameters you are accessing. This is because the encrypted format returned by SSM is not in AWS Encryption SDK format, so `ssm-ctl` converts it to plaintext and reencrypts it.
 
-For `ssm-ctl encrypt` and `ssm-ctl decrypt`, you must have 
+For `ssm-ctl encrypt` and `ssm-ctl decrypt`, you must have the relevant `kms:Encrypt` or `kms:Decrypt` permissions for the keys involved.
