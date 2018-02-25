@@ -24,7 +24,9 @@ import re
 import collections
 import getpass
 
-from .parameters import SSMParameter, SSMClient
+from .ssm import SSMClient
+from .parameters import SSMParameter
+from .util import VarString
 
 class InputError(Exception):
     pass
@@ -132,38 +134,43 @@ class Input(object):
             self._value = value
     
     def set_value_from_prompt(self, echo=None):
-        _echo = lambda default: default if echo is None else echo
-        
         if self.type == 'String':
-            self._value = self._prompt_for_string(_echo(True))
+            self._value = self._prompt_for_string(self._get_prompter(echo, True))
         elif self.type == 'SecureString':
-            self._decrypted_value = self._prompt_for_string(_echo(False))
+            self._decrypted_value = self._prompt_for_string(self._get_prompter(echo, False))
         elif self.type == 'StringList':
-            self._value = self._prompt_for_stringlist(_echo(True))
+            self._value = self._prompt_for_stringlist(self._get_prompter(echo, True))
     
-    def _prompt_for_string(self, echo):
-        input_fn = getpass.getpass if not echo else input
+    PROMPTER = None
+    SECURE_PROMPTER = None
+    
+    @classmethod
+    def _get_prompter(cls, echo, echo_default):
+        if echo is None:
+            echo = echo_default
+        if not echo:
+            return cls.SECURE_PROMPTER or getpass.getpass
+        else:
+            return cls.PROMPTER or input
         
+    def _prompt_for_string(self, prompter):
         type_str = ' [{}]'.format(self.type) if self.type else ''
         desc_str = ' ({})'.format(self.description) if self.description else ''
-        value = input_fn('Enter {}{}{}: '.format(self.name, type_str, desc_str))
-        if not value and self.default:
-            return self.default
+        value = prompter('Enter {}{}{}: '.format(self.name, type_str, desc_str))
         if self.pattern and not re.search(self.pattern, value):
             raise InputError("Invalid input")
         return value
     
-    def _prompt_for_stringlist(self, echo):
-        input_fn = getpass.getpass if not echo else input
+    def _prompt_for_stringlist(self, prompter):
         print('Enter StringList {} values (blank line when done):')
-        entry = input_fn('\n')
+        entry = prompter('\n')
         if not entry and self.default:
             return self.default
         if ',' in entry:
             return entry
         value = [entry]
         while entry:
-            entry = input_fn('\n')
+            entry = prompter('\n')
             value.append(entry)
         if self.pattern and not re.search(self.pattern, ','.join(value)):
             raise InputError("Invalid input")
@@ -183,20 +190,24 @@ class Input(object):
         return 'Input({})'.format(
             ','.join(kwargs))
 
-ParameterFileData = collections.namedtuple('ParameterFileData', ['inputs', 'parameters', 'flush'])
+ParameterFileData = collections.namedtuple('ParameterFileData', ['inputs', 'parameters', 'base_paths'])
 
 INPUT_KEY = '.INPUTS'
-COMMON_KEY = '.COMMON'
-FLUSH_KEY = '.FLUSH'
+_ALTERNATE_INPUT_KEY = '.INPUT'
 
-def parse_parameter_file(obj, vars_in_name_only=False):
-    inputs = Input.load(obj.get(INPUT_KEY, {}))
+BASEPATH_KEY = '.BASEPATH'
+
+COMMON_KEY = '.COMMON'
+
+def parse_parameter_file(obj, var_mode='all'):
+    inputs = Input.load(obj.get(INPUT_KEY, obj.get(_ALTERNATE_INPUT_KEY, {})))
     
     common_data = obj.get(COMMON_KEY, {})
     
-    flush = obj.get(FLUSH_KEY, [])
-    if isinstance(flush, six.string_types):
-        flush = [flush]
+    base_path = obj.get(BASEPATH_KEY)
+    if var_mode != 'off':
+        base_path = re.sub(r'/+$', '', base_path)
+        base_path = VarString.load(base_path)
     
     parameters = {}
     for name, data in obj.items():
@@ -221,20 +232,20 @@ def parse_parameter_file(obj, vars_in_name_only=False):
         param_data.update(common_data)
         param_data.update(data)
         
-        parameters[name] = SSMParameter.load(param_data, vars_in_name_only=vars_in_name_only)
+        parameters[name] = SSMParameter.load(param_data, var_mode=var_mode, base_path=base_path)
     
-    return ParameterFileData(inputs, parameters, flush)
+    return ParameterFileData(inputs, parameters, [base_path])
 
-def compile_parameter_file(parameters, flush=None, ignore_disabled=False):
+def compile_parameter_file(parameters, base_path=None, ignore_disabled=False):
     ssm_param_file_data = {}
     
-    if flush:
-        ssm_param_file_data[FLUSH_KEY] = flush
+    if base_path:
+        ssm_param_file_data[BASEPATH_KEY] = base_path
     
     for parameter in parameters:
         if parameter.disable and ignore_disabled:
             continue
-        data = parameter.dump()
+        data = parameter.dump(full_name=not bool(base_path))
         name = data.pop('Name')
         ssm_param_file_data[name] = data
     

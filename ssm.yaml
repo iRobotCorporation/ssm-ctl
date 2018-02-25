@@ -13,68 +13,71 @@
     Type: SecureString
   StringInputWithInlineType: String
 
-.FLUSH:
-- /Test
+.BASEPATH: /Test
 
-/Test/StringParam:
+StringParam:
   Type: String
   Value: string_value
 
-/Test/StringParam/ReferenceValue:
+StringParam/ReferenceValue:
   Type: String
   Value: $(StringInput)
 
-/Test/StringParam/WithoutType:
+StringParam/WithoutType:
   Value: string_value
 
-/Test/StringParam/Inline: string_value
+StringParam/Inline: string_value
 
-/Test/StringListParam:
+StringListParam:
   Type: StringList
   Value:
   - value_1
   - value_2
 
-/Test/StringListParam/Inline:
+StringListParam/Inline:
 - value_1
 - value_2
 
-/Test/StringListParam/AsString:
+StringListParam/AsString:
   Type: StringList
   Value: value_1,value_2
 
-/Test/DisabledParam:
+DisabledParam:
   Type: InvalidType
   Disable: True
 
-/Test/Param/WithDescription:
+Param/WithDescription:
   Value: string_value
   Description: The description
 
-/Test/Param/WithPattern:
+Param/WithPattern:
   Value: string_value
   AllowedPattern: ^\w+$
 
-/Test/Param/WithPattern/Invalid:
+Param/WithPattern/Invalid:
   Disable: True
   Value: string_value
   AllowedPattern: 0+
 
-/Test/Secure/Input/SecureString:
+Secure/Input/SecureString:
   Type: SecureString
   Input: $(SecureStringInput)
   KeyId: arn:aws:kms:$(Region):$(Account):alias/test
 
-/Test/Secure/Input/SecureString/BareReference:
+Secure/Input/SecureString/BareReference:
   Type: SecureString
   Input: SecureStringInput
   KeyId: arn:aws:kms:$(Region):$(Account):alias/test
 
-/Test/Secure/Input/String:
+Secure/Input/String:
   Disable: True
   Type: SecureString
   Input: $(StringInput)
   KeyId: arn:aws:kms:$(Region):$(Account):alias/test
+
+/Outside/BasePath:
+  Type: String
+  Value: string_value
 
 # TODO: encrypted value
 # TODO: SecureString input
