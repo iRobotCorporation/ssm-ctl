@@ -23,6 +23,9 @@ from six.moves import input
 import re
 import collections
 import getpass
+import sys
+
+import yaml
 
 from .ssm import SSMClient
 from .parameters import SSMParameter
@@ -52,7 +55,8 @@ class Input(object):
         return inputs
     
     @classmethod
-    def get_resolver(cls, inputs, prompt=True, echo=None):
+    def get_resolver(cls, inputs, prompt=None, echo=None):
+        prompt = True if prompt is None else prompt
         class RegionResolver(object):
             @classmethod
             def get_value(cls, *args, **kwargs):
@@ -199,13 +203,46 @@ BASEPATH_KEY = '.BASEPATH'
 
 COMMON_KEY = '.COMMON'
 
+def load_parameter_files(parameter_files, inputs=None, var_mode='all'):
+    if inputs is None:
+        inputs = {}
+    parameters = {}
+    base_paths = []
+    for parameter_file_name, parameter_file in six.iteritems(parameter_files):
+        six.print_("Loading {}...".format(parameter_file_name))
+        data = parse_parameter_file(yaml.safe_load(parameter_file), var_mode=var_mode)
+        Input.merge_inputs(inputs, data.inputs)
+        parameters.update(data.parameters)
+        base_paths.extend(data.base_paths)
+    return ParameterFileData(inputs, parameters, base_paths)
+
+def process_inputs(inputs, prompt, echo):
+    try:
+        six.print_("Processing inputs...")
+        resolver = Input.get_resolver(inputs, prompt=prompt, echo=echo)
+        VarString.resolve(resolver)
+    except InputError as e:
+        sys.stderr.write('{}\n'.format(e))
+        sys.exit(1)
+
+def load_parameters(parameter_files, inputs=None, prompt=None, echo=None, load_parameter_files_kwargs={}):
+    inputs, parameters, base_paths = load_parameter_files(parameter_files, inputs=inputs, **load_parameter_files_kwargs)
+    
+    process_inputs(inputs, prompt=prompt, echo=echo)
+    
+    names = SSMParameter.get_names(six.itervalues(parameters))
+    
+    base_paths = [VarString.dump(p) for p in base_paths]
+    
+    return names, parameters, base_paths
+
 def parse_parameter_file(obj, var_mode='all'):
     inputs = Input.load(obj.get(INPUT_KEY, obj.get(_ALTERNATE_INPUT_KEY, {})))
     
     common_data = obj.get(COMMON_KEY, {})
     
     base_path = obj.get(BASEPATH_KEY)
-    if var_mode != 'off':
+    if base_path and var_mode != 'off':
         base_path = re.sub(r'/+$', '', base_path)
         base_path = VarString.load(base_path)
     
@@ -234,7 +271,9 @@ def parse_parameter_file(obj, var_mode='all'):
         
         parameters[name] = SSMParameter.load(param_data, var_mode=var_mode, base_path=base_path)
     
-    return ParameterFileData(inputs, parameters, [base_path])
+    base_paths = [base_path] if base_path else []
+    
+    return ParameterFileData(inputs, parameters, base_paths)
 
 def compile_parameter_file(parameters, base_path=None, ignore_disabled=False):
     ssm_param_file_data = {}
