@@ -136,7 +136,10 @@ class SSMClient(object):
         if full:
             #TODO: catch exceptions, store as invalid
             for name in names:
-                parameter_versions = cls.get_versions(name, reencrypt=reencrypt, limit=1, loader=loader, base_path=base_path)
+                try:
+                    parameter_versions = cls.get_versions(name, reencrypt=reencrypt, limit=1, loader=loader, base_path=base_path)
+                except Exception as e:
+                    invalid_parameter_names.append(name)
                 parameters.append(parameter_versions[0])
         else:
             client = cls._client()
@@ -239,6 +242,16 @@ class SSMClient(object):
     _MASTER_KEYS = set()
     
     @classmethod
+    def get_master_key_provider(cls, key_id=None):
+        if not cls._MASTER_KEY_PROVIDER:
+            import aws_encryption_sdk
+            cls._MASTER_KEY_PROVIDER = aws_encryption_sdk.KMSMasterKeyProvider()
+        if key_id and key_id not in cls._MASTER_KEYS:
+            cls._MASTER_KEY_PROVIDER.add_master_key(key_id)
+            cls._MASTER_KEYS.add(key_id)
+        return cls._MASTER_KEY_PROVIDER
+    
+    @classmethod
     def _default_encrypter(cls, plaintext, key_id):
         import aws_encryption_sdk
         ciphertext, _ = aws_encryption_sdk.encrypt(
@@ -260,16 +273,6 @@ class SSMClient(object):
     
     _ENCRYPTER = _default_encrypter
     _DECRYPTER = _default_decrypter
-    
-    @classmethod
-    def get_master_key_provider(cls, key_id=None):
-        if not cls._MASTER_KEY_PROVIDER:
-            import aws_encryption_sdk
-            cls._MASTER_KEY_PROVIDER = aws_encryption_sdk.KMSMasterKeyProvider()
-        if key_id and key_id not in cls._MASTER_KEYS:
-            cls._MASTER_KEY_PROVIDER.add_master_key(key_id)
-            cls._MASTER_KEYS.add(key_id)
-        return cls._MASTER_KEY_PROVIDER
     
     @classmethod
     def encrypt(cls, plaintext, key_id):

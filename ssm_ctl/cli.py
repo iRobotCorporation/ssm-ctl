@@ -23,12 +23,13 @@ import sys
 import argparse
 import getpass
 import os.path
+import re
 
 import yaml
 
 from .ssm import SSMClient
-from .parameters import SSMParameter, VarString
-from .files import parse_parameter_file, Input, InputError, ParameterFileData, compile_parameter_file
+from .parameters import SSMParameter
+from .files import Input, load_parameters, compile_parameter_file
 
 def add_common_args(parser, defaults):
     verbose_group = parser.add_mutually_exclusive_group()
@@ -67,35 +68,13 @@ def add_prompt_args(parser, defaults):
     prompt_group.add_argument('--no-prompt', action='store_false', dest='prompt')
     defaults['prompt'] = True
 
-def load_parameter_files(parameter_files, inputs=None, var_mode='all', args=None):
-    if inputs is None:
-        inputs = {}
-    parameters = {}
-    base_paths = []
-    for parameter_file in parameter_files:
-        six.print_("Loading {}...".format(parameter_file.name))
-        data = parse_parameter_file(yaml.safe_load(parameter_file), var_mode=var_mode)
-        Input.merge_inputs(inputs, data.inputs)
-        parameters.update(data.parameters)
-        base_paths.extend(data.base_paths)
-    return ParameterFileData(inputs, parameters, base_paths)
-
-def process_inputs(inputs, prompt, echo, args=None):
-    try:
-        six.print_("Processing inputs...")
-        resolver = Input.get_resolver(inputs, prompt=prompt, echo=echo)
-        VarString.resolve(resolver)
-    except InputError as e:
-        sys.stderr.write('{}\n'.format(e))
-        sys.exit(1)
-
-def flush(paths, names, args=None):
+def flush(paths, names):
     for path in paths:
         six.print_("Flushing base path {}...".format(path))
         diff = SSMClient.diff_path(path, names)
         SSMClient.delete(diff.remove)
 
-def print_diff(diff, args=None):
+def print_diff(diff):
     lines = []
         
     lines.append('*** PARAMETERS TO ADD ***')
@@ -109,8 +88,8 @@ def print_diff(diff, args=None):
     lines.append('*** PARAMETERS TO REMOVE ***')
     lines.extend(diff.remove)
     six.print_('\n'.join(lines))
-
-def _load_files_main_helper(parser, args, add_parser_args=None, load_parameter_files_kwargs={}):
+    
+def _load_files_args_helper(parser, args, add_parser_args=None):
     parser.add_argument('parameter_file', type=argparse.FileType('r'), nargs='+')
     
     if add_parser_args:
@@ -127,14 +106,18 @@ def _load_files_main_helper(parser, args, add_parser_args=None, load_parameter_f
     
     inputs = load_inputs_from_args(args)
     
-    inputs, parameters, base_paths = load_parameter_files(args.parameter_file, inputs=inputs, args=args, **load_parameter_files_kwargs)
+    return args, inputs
+
+def _load_files_main_helper(parser, args, add_parser_args=None, load_parameter_files_kwargs={}):
+    args, inputs = _load_files_args_helper(parser, args, add_parser_args=add_parser_args)
     
-    process_inputs(inputs, prompt=args.prompt, echo=args.echo, args=args)
+    parameter_files = {pf.name: pf for pf in args.parameter_file}
     
-    names = SSMParameter.get_names(six.itervalues(parameters))
-    
-    base_paths = [VarString.dump(p) for p in base_paths]
-    
+    names, parameters, base_paths = load_parameters(parameter_files,
+                              prompt=args.prompt,
+                              echo=args.echo,
+                              inputs=inputs,
+                              load_parameter_files_kwargs=load_parameter_files_kwargs)
     return args, names, parameters, base_paths
 
 def push_main(args=None):
@@ -162,15 +145,15 @@ def push_main(args=None):
         six.print_(yaml.dump(data, default_flow_style=False))
 
         if args.diff:
-            print_diff(diff, args=args)
+            print_diff(diff)
         return
     
     if args.diff:
-        print_diff(diff, args=args)
+        print_diff(diff)
     
     if args.delete:
         six.print_("Processing removed parameters...")
-        flush(base_paths, names, args=args)
+        flush(base_paths, names)
     
     six.print_("Putting parameters")
     SSMParameter.OVERWRITE_DEFAULT = args.overwrite
@@ -187,7 +170,7 @@ def diff_main(args=None):
     
     diff = SSMClient.diff_paths(base_paths, names)
     
-    print_diff(diff, args=args)
+    print_diff(diff)
 
 def delete_main(args=None):
     parser = argparse.ArgumentParser()
@@ -198,10 +181,26 @@ def delete_main(args=None):
     
     args, names, parameters, base_paths = _load_files_main_helper(parser, args, load_parameter_files_kwargs=load_parameter_files_kwargs)
     
-    flush(base_paths, names, args=args)
+    flush(base_paths, names)
     
     six.print_("Deleting parameters")
     SSMClient.delete(names)
+
+def _download_helper(paths):
+    paths = [re.sub(r'/+$', '', p) for p in paths]
+    
+    if len(paths) == 1:
+        base_path = paths[0]
+    else:
+        base_path = None
+        
+    parameters = []
+    for path in paths:
+        parameters.extend(SSMClient.get_path(path, full=True, loader=SSMParameter.ssm_client_loader))
+    
+    ssm_param_file_data = compile_parameter_file(parameters, base_path)
+    
+    return ssm_param_file_data
 
 def download_main(args=None):
     parser = argparse.ArgumentParser()
@@ -215,15 +214,7 @@ def download_main(args=None):
     if args.reencrypt_key_id:
         SSMClient.set_reencrypt_key(args.reencrypt_key_id)
     
-    base_paths = args.path
-    if len(base_paths) == 1:
-        base_paths = base_paths[0]
-    
-    parameters = []
-    for path in args.path:
-        parameters.extend(SSMClient.get_path(path, full=True, loader=SSMParameter.ssm_client_loader))
-    
-    ssm_param_file_data = compile_parameter_file(parameters, base_paths)
+    ssm_param_file_data = _download_helper(args.path)
     
     if not args.output:
         args.output = sys.stdout
@@ -232,8 +223,8 @@ def download_main(args=None):
 
 def encrypt_main(args=None):
     """
-    ssm-ctl encrypt PARAMETER_FILE PATH VALUE [PATH VALUE]...
-    ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE PATH [PATH]...
+    ssm-ctl encrypt PARAMETER_FILE NAME VALUE [NAME VALUE]...
+    ssm-ctl encrypt --prompt [--echo] PARAMETER_FILE NAME [NAME]...
     """
     
     parser = argparse.ArgumentParser()
@@ -260,25 +251,25 @@ def encrypt_main(args=None):
     data = {}
     if not args.prompt:
         if not len(args.args) % 2 == 0:
-            parser.error("Provide a value for every path")
+            parser.error("Provide a value for every name")
         for i in range(0, len(args.args), 2):
             data[args.args[i]] = SSMClient.encrypt(args.args[i+1], args.key_id)
     else:
-        for path in args.args:
-            value = input_fn('{}: '.format(path))
-            data[path] = SSMClient.encrypt(value, args.key_id)
+        for name in args.args:
+            value = input_fn('{}: '.format(name))
+            data[name] = SSMClient.encrypt(value, args.key_id)
     
-    for path, value in six.iteritems(data):
+    for name, value in six.iteritems(data):
         data = {
             'EncryptedValue': value,
             'KeyId': args.key_id,
         }
-        if path not in parameter_file:
-            parameter_file[path] = data
-        if path in parameter_file:
-            if not isinstance(parameter_file[path], dict):
-                parameter_file[path] = {}
-            parameter_file[path].update(data)
+        if name not in parameter_file:
+            parameter_file[name] = data
+        if name in parameter_file:
+            if not isinstance(parameter_file[name], dict):
+                parameter_file[name] = {}
+            parameter_file[name].update(data)
     
     with open(args.parameter_file, 'w') as fp:
         yaml.safe_dump(parameter_file, fp, default_flow_style=False)

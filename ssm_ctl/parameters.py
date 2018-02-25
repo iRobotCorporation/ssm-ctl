@@ -264,30 +264,3 @@ class SSMParameter(object):
     
     def put(self):
         SSMClient.batch_put([self], dumper=self.ssm_client_dumper)
-
-class SSMParameterRequirement(object):
-    def __init__(self):
-        self.name = None #regex
-        self.allowed = None #bool
-        self.type = None #string
-        self.value = None #regex
-        self.secure = None #bool
-        self.key_id = None #regex
-        self.allowed_pattern = None #string
-        self.description = None
-    
-    def validate(self, parameter):
-        if self.name and not re.search(self.name, parameter.get_name()):
-            return True, []
-        errors = []
-        if self.type and parameter.type != self.type:
-            errors.append("type is {} not {}".format(parameter.type, self.type))
-        if self.value and not re.search(self.value, parameter.value):
-            errors.append("value {} is invalid", parameter.value)
-        if self.secure and not parameter.secure:
-            errors.append("is not secure")
-        if self.key_id and not re.search(self.key_id, parameter.key_id):
-            errors.append("key id {} is invalid".format(parameter.key_id))
-        if self.allowed_pattern and self.allowed_pattern != parameter.allowed_pattern:
-            errors.append("allowed pattern {} is invalid".format(parameter.allowed_pattern))
-        return not bool(errors), errors
