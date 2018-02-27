@@ -120,7 +120,7 @@ def _load_files_main_helper(parser, args, add_parser_args=None, load_parameter_f
                               load_parameter_files_kwargs=load_parameter_files_kwargs)
     return args, names, parameters, base_paths
 
-def push_main(args=None):
+def deploy_main(args=None):
     def add_parser_args(parser):
         parser.add_argument('--overwrite', action='store_true', default=False, help='Allow overwrites by default')
         parser.add_argument('--delete', action='store_true')
@@ -295,7 +295,7 @@ def main(args=None):
     if args is None:
         args = sys.argv[1:]
     
-    commands = ['push', 'diff', 'delete', 'download', 'encrypt', 'decrypt']
+    commands = ['deploy', 'diff', 'delete', 'download', 'encrypt', 'decrypt']
     
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=commands)

@@ -18,7 +18,7 @@ ssm-ctl download -o ssm.yaml /
 ### Push changes
 
 ```
-ssm-ctl push [--overwrite] [--delete] ssm.yaml
+ssm-ctl deploy [--overwrite] [--delete] ssm.yaml
 ```
 
 If there are existing parameters, they won't be overwritten (this is a feature of SSM's API).
@@ -28,7 +28,7 @@ To delete any parameters that you have removed, use the `--delete` flag (with ca
 ## The SSM parameters file
 
 The parameters file contains parameter names with their associated values and settings, as well
-as configurations for deleting parameters in advance of pushing, and for prompting for user input.
+as configurations for deleting parameters in advance of deploying, and for prompting for user input.
 
 ### Parameters
 
@@ -125,17 +125,17 @@ ssm-ctl download [--output FILE] PATH [PATH]...
 
 Produce a parameter file from the parameters at the given paths, saved to the given file or stdout.
 
-### ssm-ctl push
+### ssm-ctl deploy
 
 ```
-ssm-ctl push [--overwrite] [--delete] [--dry-run] [--input NAME VALUE]... [--secure-input NAME]... PARAMETER_FILE...
+ssm-ctl deploy [--overwrite] [--delete] [--dry-run] [--input NAME VALUE]... [--secure-input NAME]... PARAMETER_FILE...
 ```
 
-Load the given parameter files and push the parameters to SSM.
+Load the given parameter files and deploy the parameters to SSM.
 * `--overwrite` Default to overwriting existing parameters
 * `--delete` Delete parameters as found by the diff (see below).
 * `--input NAME VALUE` Set the variable `NAME` to `VALUE`
-* `--dry-run` Print out the parameter configuration that would be pushed, but do not push it.
+* `--dry-run` Print out the parameter configuration that would be deployed, but do not deploy it.
 * `--diff` Print out the diff (see below).
  * Note this may still make KMS calls to decrypt encrypted `SecureString` parameter values.
 
@@ -145,7 +145,7 @@ Load the given parameter files and push the parameters to SSM.
 ssm-ctl diff [--input NAME VALUE]... [--secure-input NAME]... PARAMETER_FILE...
 ```
 
-Diff the parameters against the existing parameters in SSM. Any `.BASEPATH`s specified in the files will be searched for existing parameters, allowing parameters not present in the files to be identified as removed. This mechanism is used for the `--delete` flag in `ssm-ctl push`. 
+Diff the parameters against the existing parameters in SSM. Any `.BASEPATH`s specified in the files will be searched for existing parameters, allowing parameters not present in the files to be identified as removed. This mechanism is used for the `--delete` flag in `ssm-ctl deploy`. 
 
 ### ssm-ctl delete
 
@@ -194,7 +194,7 @@ ssm-ctl decrypt PARAMETER_FILE
 
 ### Permissions
 
-For `ssm-ctl push`, you need `kms:Encrypt` permission for the `KeyId`s you have specified. For any encrypted value in the parameter file or input on the command line, you must have `kms:Decrypt` permissions for the associated key.
+For `ssm-ctl deploy`, you need `kms:Encrypt` permission for the `KeyId`s you have specified. For any encrypted value in the parameter file or input on the command line, you must have `kms:Decrypt` permissions for the associated key.
 
 For `ssm-ctl download`, you currently need both `kms:Decrypt` and `kms:Encrypt` permission for the keys associated with the parameters you are accessing. This is because the encrypted format returned by SSM is not in AWS Encryption SDK format, so `ssm-ctl` converts it to plaintext and reencrypts it.
 
