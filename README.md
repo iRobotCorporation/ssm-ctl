@@ -1,5 +1,11 @@
 # ssm-ctl
 
+`ssm-ctl` applies infrastructure-as-code principles to [AWS Systems Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html). It allows you to define the values of parameters in files (that you can keep in source control) and deploy those values into Parameter Store, with the ability to remove previously-deployed parameters if desired.
+
+Multiple parameter files can be combined in a deployment, and parameter files can also require input from users (either interactively or provided on the command line). This capability allows you to, for example, manage multiple environments, accounts, or regions in a sensible way; a common parameters file (that can use an input to put the environment name in parameter names) and environment files for parameters that only appear in specific environments.
+
+`ssm-ctl` supports SecureString parameters for storing secrets by allowing you to keep KMS-encrypted values in your parameter files.
+
 ## Quickstart
 
 ### Install
